@@ -1,5 +1,3 @@
-# urls.py
-
 from django.contrib import admin
 from django.urls import path
 from ninja import NinjaAPI, Schema
@@ -7,12 +5,40 @@ from django.shortcuts import get_object_or_404
 from typing import List, Optional
 from datetime import date
 from decimal import Decimal
+from django.contrib.auth.hashers import make_password
 from django.db import connection
+from ninja.security import HttpBearer
+from django.conf import settings
+from ninja.errors import HttpError
+from datetime import datetime, timedelta
+import jwt # pylint: disable=import-error
+import re
 
-api = NinjaAPI()
+
+class AuthBearer(HttpBearer):
+    def authenticate(self, request, token):
+        try:
+            payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
+            return payload['user_id']
+        except jwt.ExpiredSignatureError:
+            raise HttpError(401, "Token has expired")
+        except jwt.InvalidTokenError:
+            raise HttpError(401, "Invalid token")
+
+api = NinjaAPI(auth=AuthBearer())
 
 # Schemas
+class RegisterSchema(Schema):
+    username: str
+    password: str
+    confirm_password: str
+
+class LoginSchema(Schema):
+    username: str
+    password: str
+
 class CategorySchema(Schema):
+    id: int
     name: str
 
 class ExpenseSchema(Schema):
@@ -42,6 +68,51 @@ class IncomeInSchema(Schema):
     source: Optional[str]
     description: Optional[str]
     date: date
+
+
+
+@api.post("/login", auth=None)
+def login(request, credentials: LoginSchema):
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT id FROM users WHERE username = %s AND password = %s",
+            [credentials.username, credentials.password]
+        )
+        user = cursor.fetchone()
+        if user:
+            payload = {
+                'user_id': user[0],
+                'exp': datetime.utcnow() + timedelta(days=1)
+            }
+            token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
+            return {"token": token}
+    return {"error": "Invalid credentials"}
+
+@api.post("/register", auth=None)
+def register(request, data: RegisterSchema):
+    if len(data.password) < 9:
+        raise HttpError(400, "Password must be at least 8 characters long")
+
+    if data.password != data.confirm_password:
+        raise HttpError(400, "Passwords do not match")
+
+    if not re.search(r'\d', data.password) or not re.search(r'[a-zA-Z]', data.password):
+        raise HttpError(400, "Password must contain both letters and numbers")
+
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT id FROM auth_user WHERE username = %s", [data.username])
+        if cursor.fetchone():
+            raise HttpError(409, "Username already exists")
+
+        hashed_password = make_password(data.password)
+        cursor.execute(
+            "INSERT INTO auth_user (username, password, is_superuser, is_staff, is_active, date_joined) "
+            "VALUES (%s, %s, %s, %s, %s, %s)",
+            [data.username, hashed_password, False, False, True, datetime.now()]
+        )
+        user_id = cursor.lastrowid
+
+    return {"message": "Registration successful. Please log in."}
 
 # Category endpoints
 @api.get("/categories", response=List[CategorySchema])
@@ -80,7 +151,7 @@ def create_expense(request, payload: ExpenseInSchema):
     with connection.cursor() as cursor:
         cursor.execute(
             "INSERT INTO expenses (user_id, category_id, amount, description, date) VALUES (%s, %s, %s, %s, %s)",
-            [request.user.id, payload.category_id, payload.amount, payload.description, payload.date]
+            [request.auth, payload.category_id, payload.amount, payload.description, payload.date]
         )
         expense_id = cursor.lastrowid
         cursor.execute("SELECT * FROM expenses WHERE id = %s", [expense_id])
@@ -130,7 +201,7 @@ def create_income(request, payload: IncomeInSchema):
     with connection.cursor() as cursor:
         cursor.execute(
             "INSERT INTO income (user_id, amount, source, description, date) VALUES (%s, %s, %s, %s, %s)",
-            [request.user.id, payload.amount, payload.source, payload.description, payload.date]
+            [request.auth, payload.amount, payload.source, payload.description, payload.date]
         )
         income_id = cursor.lastrowid
         cursor.execute("SELECT * FROM income WHERE id = %s", [income_id])
