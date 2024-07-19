@@ -68,9 +68,11 @@
 <script setup>
 import { ref } from 'vue'
 import { useTheme } from 'vuetify'
+import { useRouter } from 'vue-router'
 import axios from 'axios'
 
 const theme = useTheme()
+const router = useRouter()
 
 const username = ref('')
 const password = ref('')
@@ -99,8 +101,16 @@ const handleSubmit = async () => {
       showSnackbar(error.response?.data?.detail || 'An error occurred', 'error')
     }
   } else {
-    // Handle login logic here
-    console.log('Login clicked')
+    try {
+      const response = await axios.post('http://localhost:8000/api/login', {
+        username: username.value,
+        password: password.value
+      })
+      localStorage.setItem('token', response.data.token)
+      router.push('/home')
+    } catch (error) {
+      showSnackbar(error.response?.data?.detail || 'Login failed', 'error')
+    }
   }
 }
 

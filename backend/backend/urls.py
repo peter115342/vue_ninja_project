@@ -3,16 +3,20 @@ from django.urls import path
 from ninja import NinjaAPI, Schema
 from django.shortcuts import get_object_or_404
 from typing import List, Optional
-from datetime import date
+from datetime import date, timezone, timedelta
 from decimal import Decimal
 from django.contrib.auth.hashers import make_password
 from django.db import connection
 from ninja.security import HttpBearer
+import re
+
 from django.conf import settings
 from ninja.errors import HttpError
 from datetime import datetime, timedelta
-import jwt # pylint: disable=import-error
-import re
+from django.contrib.auth import authenticate
+import jwt
+
+
 
 
 class AuthBearer(HttpBearer):
@@ -20,10 +24,8 @@ class AuthBearer(HttpBearer):
         try:
             payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
             return payload['user_id']
-        except jwt.ExpiredSignatureError:
-            raise HttpError(401, "Token has expired")
-        except jwt.InvalidTokenError:
-            raise HttpError(401, "Invalid token")
+        except jwt.exceptions.PyJWTError:
+            return None
 
 api = NinjaAPI(auth=AuthBearer())
 
@@ -72,20 +74,17 @@ class IncomeInSchema(Schema):
 
 
 @api.post("/login", auth=None)
-def login(request, credentials: LoginSchema):
-    with connection.cursor() as cursor:
-        cursor.execute(
-            "SELECT id FROM users WHERE username = %s AND password = %s",
-            [credentials.username, credentials.password]
-        )
-        user = cursor.fetchone()
-        if user:
-            payload = {
-                'user_id': user[0],
-                'exp': datetime.utcnow() + timedelta(days=1)
-            }
-            token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
-            return {"token": token}
+def login(request, data: LoginSchema):
+    user = authenticate(username=data.username, password=data.password)
+    if user is not None:
+        payload = {
+            'user_id': user.id,
+            'exp': datetime.now(tz=timezone.utc) + timedelta(days=1)
+        }
+        token = jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
+        if isinstance(token, bytes):
+            token = token.decode('utf-8')
+        return {"token": token}
     return {"error": "Invalid credentials"}
 
 @api.post("/register", auth=None)
